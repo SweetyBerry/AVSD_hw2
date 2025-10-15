@@ -229,16 +229,16 @@ module AXI(
 	// 用於控制主從端選擇與讀寫狀態機運作
 	// ================================================================
 
-	logic pre_rmaster_r;               // Previous read master selection (前一次讀取主端選擇)
-	logic rmaster_sel;                 // Current read master selector (當前讀取主端選擇)
-	logic rmaster_dat_sel;             // Data-phase read master select (資料階段主端選擇)
-	logic [1:0] rslave_sel;            // Current read slave select (當前讀取從端選擇)
-	logic [1:0] rslave_dat_sel;        // Data-phase read slave select (資料階段從端選擇)
-	logic cs, ns;                      // FSM states for read channel (讀取通道狀態機: current / next)
-	logic cs_w, ns_w;                  // FSM states for write channel (寫入通道狀態機: current / next)
+	logic r_master_prev;               // Previous read master selection (前一次讀取主端選擇)
+	logic r_master_sel_cur;                 // Current read master selector (當前讀取主端選擇)
+	logic r_master_sel_data;             // Data-phase read master select (資料階段主端選擇)
+	logic [1:0] r_slave_sel_cur;            // Current read slave select (當前讀取從端選擇)
+	logic [1:0] r_slave_sel_data;        // Data-phase read slave select (資料階段從端選擇)
+	logic r_state_cur, r_state_next;                      // FSM states for read channel (讀取通道狀態機: current / next)
+	logic w_state_cur, w_state_next;                  // FSM states for write channel (寫入通道狀態機: current / next)
 	logic cs_0, cs_1, ns_0, ns_1;      // Unused placeholders for sub-FSMs (預留變數)
-	logic [1:0] wslave_sel;            // Write slave selection (寫入從端選擇)
-	logic [1:0] wslave_dat_sel;        // Data-phase write slave select (資料階段從端選擇)
+	logic [1:0] w_slave_sel_cur;            // Write slave selection (寫入從端選擇)
+	logic [1:0] w_slave_sel_data;        // Data-phase write slave select (資料階段從端選擇)
 
 	// Registers for capturing read address channel information (暫存主端讀取命令)
 	logic [`AXI_ID_BITS-1:0]   ARID_M0_reg;
@@ -263,11 +263,11 @@ module AXI(
 	// ================================================================
 	always_ff @(posedge ACLK or negedge ARESETn) begin
 		if (!ARESETn) begin
-			cs   <= 1'b0;   // Reset read-FSM state (重設讀取狀態機)
-			cs_w <= 1'b0;   // Reset write-FSM state (重設寫入狀態機)
+			r_state_cur   <= 1'b0;   // Reset read-FSM state (重設讀取狀態機)
+			w_state_cur <= 1'b0;   // Reset write-FSM state (重設寫入狀態機)
 		end else begin
-			cs   <= ns;     // Update read FSM to next state (更新至下一狀態)
-			cs_w <= ns_w;   // Update write FSM to next state (更新至下一狀態)
+			r_state_cur   <= r_state_next;     // Update read FSM to next state (更新至下一狀態)
+			w_state_cur <= w_state_next;   // Update write FSM to next state (更新至下一狀態)
 		end
 	end
 
@@ -275,25 +275,25 @@ module AXI(
 	// FSM Next-State Logic (讀寫狀態機次狀態判斷)
 	// ------------------------------------------------
 	// Controls transaction flow:
-	//   - Read FSM (cs/ns) handles AR/R channels
-	//   - Write FSM (cs_w/ns_w) handles AW/W/B channels
+	//   - Read FSM (r_state_cur/r_state_next) handles AR/R channels
+	//   - Write FSM (w_state_cur/w_state_next) handles AW/W/B channels
 	// ================================================================
 	always_comb begin
 		// -----------------------------
 		// Read channel FSM (讀取通道)
 		// -----------------------------
-		case(cs)
+		case(r_state_cur)
 			1'b0 : begin
 				// Idle state → check if any master starts read
 				// 閒置狀態：檢查是否有 master 發出讀取要求
-				ns = (ARVALID_M0 || ARVALID_M1);
+				r_state_next = (ARVALID_M0 || ARVALID_M1);
 			end
 			1'b1 : begin
 				// Busy state → wait until last data transferred
 				// 工作狀態：等待資料傳輸完成
-				ns = ~(
-					((!rmaster_dat_sel) && RREADY_M0 && RVALID_M0 && RLAST_M0) || 
-					(RLAST_M1 && RREADY_M1 && RVALID_M1 && rmaster_dat_sel)
+				r_state_next = ~(
+					((!r_master_sel_data) && RREADY_M0 && RVALID_M0 && RLAST_M0) || 
+					(RLAST_M1 && RREADY_M1 && RVALID_M1 && r_master_sel_data)
 				);
 			end
 		endcase
@@ -301,16 +301,16 @@ module AXI(
 		// -----------------------------
 		// Write channel FSM (寫入通道)
 		// -----------------------------
-		case(cs_w)
+		case(w_state_cur)
 			1'b0 : begin
 				// Idle → start when AW handshake occurs
 				// 閒置狀態：AWVALID/AWREADY 為高時啟動
-				ns_w = (AWVALID_M1 && AWREADY_M1);
+				w_state_next = (AWVALID_M1 && AWREADY_M1);
 			end 
 			1'b1 : begin
 				// Busy → stay until write response accepted
 				// 工作狀態：等待 BVALID/BREADY 完成
-				ns_w = ~(BREADY_M1 && BVALID_M1);
+				w_state_next = ~(BREADY_M1 && BVALID_M1);
 			end
 		endcase
 	end
@@ -322,19 +322,19 @@ module AXI(
 	// 在多個 master 之間進行仲裁 (取交替或固定優先順序)
 	// ================================================================
 	always_comb begin : master_select
-		case(cs)
+		case(r_state_cur)
 			1'b0 : begin
 				case({ARVALID_M0, ARVALID_M1})
-					2'b11 : rmaster_sel = ~pre_rmaster_r; // Alternate if both valid (雙方同時要求則交替)
-					2'b10 : rmaster_sel = 1'b0;           // Only M0 active
-					2'b01 : rmaster_sel = 1'b1;           // Only M1 active
-					2'b00 : rmaster_sel = pre_rmaster_r;  // No request → hold previous
+					2'b11 : r_master_sel_cur = ~r_master_prev; // Alternate if both valid (雙方同時要求則交替)
+					2'b10 : r_master_sel_cur = 1'b0;           // Only M0 active
+					2'b01 : r_master_sel_cur = 1'b1;           // Only M1 active
+					2'b00 : r_master_sel_cur = r_master_prev;  // No request → hold previous
 				endcase
 			end 
 			1'b1 : begin
 				// During data phase, hold previous master
 				// 資料傳輸期間維持原主端選擇
-				rmaster_sel = pre_rmaster_r;
+				r_master_sel_cur = r_master_prev;
 			end 
 		endcase
 	end
@@ -346,25 +346,25 @@ module AXI(
 	// 依據地址範圍決定目標從端 (地址高 16 位 = 0000 或 0001)
 	// ================================================================
 	always_comb begin
-		case(cs)
+		case(r_state_cur)
 			1'b0 : begin			
 				// During address phase (位址階段)
-				if ((rmaster_sel && ARVALID_M1) && (ARADDR_M1[31:16] == 16'h0000 || ARADDR_M1[31:16] == 16'h0001)) begin
-					rslave_sel = ARADDR_M1[17:16]; // Select slave by addr[17:16]
-				end else if ((!rmaster_sel) && ARVALID_M0 && (ARADDR_M0[31:16] == 16'h0000 || ARADDR_M0[31:16] == 16'h0001)) begin
-					rslave_sel = ARADDR_M0[17:16];
+				if ((r_master_sel_cur && ARVALID_M1) && (ARADDR_M1[31:16] == 16'h0000 || ARADDR_M1[31:16] == 16'h0001)) begin
+					r_slave_sel_cur = ARADDR_M1[17:16]; // Select slave by addr[17:16]
+				end else if ((!r_master_sel_cur) && ARVALID_M0 && (ARADDR_M0[31:16] == 16'h0000 || ARADDR_M0[31:16] == 16'h0001)) begin
+					r_slave_sel_cur = ARADDR_M0[17:16];
 				end else begin
-					rslave_sel = 2'd2; // invalid / unmapped region (無效地址)
+					r_slave_sel_cur = 2'd2; // invalid / unmapped region (無效地址)
 				end
 			end
 			1'b1 : begin
 				// During data phase (資料階段)
-				if ((rmaster_dat_sel && ARVALID_M1) && (ARADDR_M1[31:16] == 16'h0000 || ARADDR_M1[31:16] == 16'h0001)) begin
-					rslave_sel = ARADDR_M1[17:16];
-				end else if ((!rmaster_dat_sel) && ARVALID_M0 && (ARADDR_M0[31:16] == 16'h0000 || ARADDR_M0[31:16] == 16'h0001)) begin
-					rslave_sel = ARADDR_M0[17:16];
+				if ((r_master_sel_data && ARVALID_M1) && (ARADDR_M1[31:16] == 16'h0000 || ARADDR_M1[31:16] == 16'h0001)) begin
+					r_slave_sel_cur = ARADDR_M1[17:16];
+				end else if ((!r_master_sel_data) && ARVALID_M0 && (ARADDR_M0[31:16] == 16'h0000 || ARADDR_M0[31:16] == 16'h0001)) begin
+					r_slave_sel_cur = ARADDR_M0[17:16];
 				end else begin
-					rslave_sel = 2'd2; // invalid / unmapped region
+					r_slave_sel_cur = 2'd2; // invalid / unmapped region
 				end
 			end
 		endcase
@@ -374,9 +374,9 @@ module AXI(
 		// Determine target slave based on AWADDR[17:16]
 		// ============================================================
 		if (AWVALID_M1 && (AWADDR_M1[31:16] == 16'h0000 || AWADDR_M1[31:16] == 16'h0001)) begin
-			wslave_sel = AWADDR_M1[17:16];
+			w_slave_sel_cur = AWADDR_M1[17:16];
 		end else begin
-			wslave_sel = 2'd2; // invalid / unmapped
+			w_slave_sel_cur = 2'd2; // invalid / unmapped
 		end
 	end
 
@@ -388,31 +388,31 @@ module AXI(
 	// ================================================================
 	always_ff @(posedge ACLK or negedge ARESETn) begin
 		if (!ARESETn) begin
-			pre_rmaster_r   <= 1'b0;   // Previous read master (初始化)
-			rslave_dat_sel  <= 2'd0;   // Latched slave ID (讀取資料階段從端)
-			rmaster_dat_sel <= 1'b0;   // Latched read master (讀取資料階段主端)
-			wslave_dat_sel  <= 2'd0;   // Latched write slave (寫入資料階段從端)
+			r_master_prev   <= 1'b0;   // Previous read master (初始化)
+			r_slave_sel_data  <= 2'd0;   // Latched slave ID (讀取資料階段從端)
+			r_master_sel_data <= 1'b0;   // Latched read master (讀取資料階段主端)
+			w_slave_sel_data  <= 2'd0;   // Latched write slave (寫入資料階段從端)
 		end else begin
-			case(cs)
+			case(r_state_cur)
 				1'b0 : begin
 					// Latch selections when read starts (當讀取開始時鎖存選擇)
 					if (ARVALID_M0 || ARVALID_M1) begin
-						rslave_dat_sel  <= rslave_sel;
-						rmaster_dat_sel <= rmaster_sel;
+						r_slave_sel_data  <= r_slave_sel_cur;
+						r_master_sel_data <= r_master_sel_cur;
 					end 
 				end
 				1'b1 : begin
 					// After transfer complete, store last master as previous
 					// 傳輸結束後記錄上一次的主端
-					pre_rmaster_r <= rmaster_sel;
+					r_master_prev <= r_master_sel_cur;
 				end
 			endcase
 
 			// Latch write slave during AW phase (鎖存寫入從端)
 			if (AWVALID_M1)
-				wslave_dat_sel <= wslave_sel;
+				w_slave_sel_data <= w_slave_sel_cur;
 			else
-				wslave_dat_sel <= wslave_dat_sel;
+				w_slave_sel_data <= w_slave_sel_data;
 		end
 	end
 
@@ -425,13 +425,13 @@ module AXI(
 	// 根據選擇信號動態連線 master 與 slave 的 AR/R 通道
 	// ================================================================
 	always_comb begin
-		case(cs)
+		unique case(r_state_cur)
 		// ------------------------------------------------------------
 		// Address phase (位址階段)
 		// ------------------------------------------------------------
 		1'b0 : begin
 			// ========== Master0 → Slave1 ==========
-			if (rslave_sel == 2'd1 && (!rmaster_sel)) begin
+			if (r_slave_sel_cur == 2'd1 && (!r_master_sel_cur)) begin
 				// connect M0 read to S1
 				ARID_S0     = 8'd0;
 				ARADDR_S0   = 32'd0;
@@ -450,7 +450,7 @@ module AXI(
 				ARREADY_M0  = ARREADY_S1; // handshake pass-through
 			end 
 			// ========== Master1 → Slave1 ==========
-			else if (rslave_sel == 2'd1 && rmaster_sel) begin
+			else if (r_slave_sel_cur == 2'd1 && r_master_sel_cur) begin
 				ARID_S0     = 8'd0;
 				ARADDR_S0   = 32'd0;
 				ARLEN_S0    = 4'd0;
@@ -468,7 +468,7 @@ module AXI(
 				ARREADY_M1  = ARREADY_S1;
 			end 
 			// ========== Master1 → Slave0 ==========
-			else if (rslave_sel == 2'd0 && rmaster_sel) begin
+			else if (r_slave_sel_cur == 2'd0 && r_master_sel_cur) begin
 				ARID_S0     = {4'd0, ARID_M1};
 				ARADDR_S0   = ARADDR_M1;
 				ARLEN_S0    = ARLEN_M1;
@@ -486,7 +486,7 @@ module AXI(
 				ARREADY_M1  = ARREADY_S0;
 			end 
 			// ========== Master0 → Slave0 ==========
-			else if (rslave_sel == 2'd0 && (!rmaster_sel)) begin
+			else if (r_slave_sel_cur == 2'd0 && (!r_master_sel_cur)) begin
 				ARID_S0     = {4'd0, ARID_M0};
 				ARADDR_S0   = ARADDR_M0;
 				ARLEN_S0    = ARLEN_M0;
@@ -545,7 +545,7 @@ module AXI(
 		// ------------------------------------------------------------
 		1'b1 : begin
 			// ========== Master0 ← Slave1 ==========
-			if (rslave_dat_sel == 2'd1 && (!rmaster_dat_sel)) begin
+			if (r_slave_sel_data == 2'd1 && (!r_master_sel_data)) begin
 				ARID_S0     = 8'd0;
 				ARADDR_S0   = 32'd0;
 				ARLEN_S0    = 4'd0;
@@ -578,7 +578,7 @@ module AXI(
 				RREADY_S0   = 1'b0;
 			end 
 			// ========== Master1 ← Slave1 ==========
-			else if (rslave_dat_sel == 2'd1 && rmaster_dat_sel) begin
+			else if (r_slave_sel_data == 2'd1 && r_master_sel_data) begin
 				ARID_S0     = 8'd0;
 				ARADDR_S0   = 32'd0;
 				ARLEN_S0    = 4'd0;
@@ -610,7 +610,7 @@ module AXI(
 				RREADY_S1   = RREADY_M1;
 			end 
 				// ========== Master1 ← Slave0 ==========
-			else if (rslave_dat_sel == 2'd0 && rmaster_dat_sel) begin
+			else if (r_slave_sel_data == 2'd0 && r_master_sel_data) begin
 				ARID_S0     = {4'd0, ARID_M1};
 				ARADDR_S0   = ARADDR_M1;
 				ARLEN_S0    = ARLEN_M1;
@@ -643,7 +643,7 @@ module AXI(
 				RREADY_S0   = RREADY_M1;
 			end 
 			// ========== Master0 ← Slave0 ==========
-			else if (rslave_dat_sel == 2'd0 && (!rmaster_dat_sel)) begin
+			else if (r_slave_sel_data == 2'd0 && (!r_master_sel_data)) begin
 				ARID_S0     = {4'd0, ARID_M0};
 				ARADDR_S0   = ARADDR_M0;
 				ARLEN_S0    = ARLEN_M0;
@@ -677,17 +677,78 @@ module AXI(
 			end 
 			// ========== Invalid or unmapped case ==========
 			else begin
-				// Fallback: no valid connection (無效交易)
-				ARID_S0     = 8'd0;  ARADDR_S0 = 32'd0; ARLEN_S0 = 4'd0;
-				ARSIZE_S0   = 3'd0;  ARBURST_S0= 2'd0;  ARVALID_S0= 1'b0; ARREADY_M0=1'b0;
-				ARID_S1     = 8'd0;  ARADDR_S1 = 32'd0; ARLEN_S1 = 4'd0;
-				ARSIZE_S1   = 3'd0;  ARBURST_S1= 2'd0;  ARVALID_S1= 1'b0; ARREADY_M1=1'b0;
+				// ---------- Slave 0 ----------
+				ARID_S0     = 8'd0;
+				ARADDR_S0   = 32'd0;
+				ARLEN_S0    = 4'd0;
+				ARSIZE_S0   = 3'd0;
+				ARBURST_S0  = 2'd0;
+				ARVALID_S0  = 1'b0;
+				ARREADY_M0  = 1'b0;
 
-				// send “slave error” responses
-				RID_M0      = 4'd0;  RDATA_M0 = 32'd0; RRESP_M0 = 2'b11; RLAST_M0=1'b0; RVALID_M0=1'b0; RREADY_S0=1'b0;
-				RID_M1      = 4'd0;  RDATA_M1 = 32'd0; RRESP_M1 = 2'b11; RLAST_M1=1'b0; RVALID_M1=1'b0; RREADY_S1=1'b0;
+				// ---------- Slave 1 ----------
+				ARID_S1     = 8'd0;
+				ARADDR_S1   = 32'd0;
+				ARLEN_S1    = 4'd0;
+				ARSIZE_S1   = 3'd0;
+				ARBURST_S1  = 2'd0;
+				ARVALID_S1  = 1'b0;
+				ARREADY_M1  = 1'b0;
+
+				// ---------- Master 0 ----------
+				RID_M0      = 4'd0;
+				RDATA_M0    = 32'd0;
+				RRESP_M0    = 2'b11;
+				RLAST_M0    = 1'b0;
+				RVALID_M0   = 1'b0;
+				RREADY_S0   = 1'b0;
+
+				// ---------- Master 1 ----------
+				RID_M1      = 4'd0;
+				RDATA_M1    = 32'd0;
+				RRESP_M1    = 2'b11;
+				RLAST_M1    = 1'b0;
+				RVALID_M1   = 1'b0;
+				RREADY_S1   = 1'b0;
+
 			end
 		end
+		default : begin
+			// ---------- Slave 0 ----------
+				ARID_S0     = 8'd0;
+				ARADDR_S0   = 32'd0;
+				ARLEN_S0    = 4'd0;
+				ARSIZE_S0   = 3'd0;
+				ARBURST_S0  = 2'd0;
+				ARVALID_S0  = 1'b0;
+				ARREADY_M0  = 1'b0;
+
+				// ---------- Slave 1 ----------
+				ARID_S1     = 8'd0;
+				ARADDR_S1   = 32'd0;
+				ARLEN_S1    = 4'd0;
+				ARSIZE_S1   = 3'd0;
+				ARBURST_S1  = 2'd0;
+				ARVALID_S1  = 1'b0;
+				ARREADY_M1  = 1'b0;
+
+				// ---------- Master 0 ----------
+				RID_M0      = 4'd0;
+				RDATA_M0    = 32'd0;
+				RRESP_M0    = 2'b11;
+				RLAST_M0    = 1'b0;
+				RVALID_M0   = 1'b0;
+				RREADY_S0   = 1'b0;
+
+				// ---------- Master 1 ----------
+				RID_M1      = 4'd0;
+				RDATA_M1    = 32'd0;
+				RRESP_M1    = 2'b11;
+				RLAST_M1    = 1'b0;
+				RVALID_M1   = 1'b0;
+				RREADY_S1   = 1'b0;
+		end
+		endcase
 	end
 
 	// ================================================================
@@ -697,7 +758,7 @@ module AXI(
 	// Master 1 為唯一寫入來源，依 AWADDR 決定 S0 或 S1 目標
 	// ================================================================
 	always_comb begin
-		case(cs_w)
+		unique case(w_state_cur)
 		// ------------------------------------------------------------
 		// Address phase (位址階段)
 		// ------------------------------------------------------------
@@ -705,7 +766,7 @@ module AXI(
 			// ------------------------------
 			// AW: Address routing
 			// ------------------------------
-			if (wslave_sel == 2'd1) begin
+			if (w_slave_sel_cur == 2'd1) begin
 				// write → Slave 1
 				AWID_S1    = {4'd0, AWID_M1};
 				AWADDR_S1  = AWADDR_M1;
@@ -717,7 +778,7 @@ module AXI(
 
 				AWID_S0    = 8'd0; AWADDR_S0=32'd0; AWLEN_S0=4'd0;
 				AWSIZE_S0  = 3'd0; AWBURST_S0=2'd0; AWVALID_S0=1'b0;
-			end else if (wslave_sel == 2'd0) begin
+			end else if (w_slave_sel_cur == 2'd0) begin
 				// write → Slave 0
 				AWID_S0    = {4'd0, AWID_M1};
 				AWADDR_S0  = AWADDR_M1;
@@ -753,7 +814,7 @@ module AXI(
 			// ------------------------------
 			// W: Write data routing
 			// ------------------------------
-			if (AWVALID_M1 && AWREADY_M1 && (wslave_sel == 2'd0)) begin
+			if (AWVALID_M1 && AWREADY_M1 && (w_slave_sel_cur == 2'd0)) begin
 				WDATA_S0 = WDATA_M1;
 				WLAST_S0 = WLAST_M1;
 				WVALID_S0 = WVALID_M1;
@@ -763,7 +824,7 @@ module AXI(
 				WLAST_S1 = 1'b0;
 				WVALID_S1 = 1'b0;
 				WSTRB_S1 = 4'd0;
-			end else if (AWVALID_M1 && AWREADY_M1 && (wslave_sel == 2'd1)) begin
+			end else if (AWVALID_M1 && AWREADY_M1 && (w_slave_sel_cur == 2'd1)) begin
 				WDATA_S1 = WDATA_M1;
 				WLAST_S1 = WLAST_M1;
 				WVALID_S1 = WVALID_M1;
@@ -795,7 +856,7 @@ module AXI(
 		// Data / Response phase (資料與回應階段)
 		// ------------------------------------------------------------
 		1'b1 : begin
-			if (wslave_dat_sel == 2'd0) begin
+			if (w_slave_sel_data == 2'd0) begin
 				// write to S0
 				WDATA_S0 = WDATA_M1;
 				WLAST_S0 = WLAST_M1;
@@ -828,7 +889,7 @@ module AXI(
 				AWSIZE_S1 = 3'd0;
 				AWBURST_S1 = 2'd0;
 				AWVALID_S1 = 1'b0;
-			end else if (wslave_dat_sel == 2'd1) begin
+			end else if (w_slave_sel_data == 2'd1) begin
 				// write to S1
 				WDATA_S1 = WDATA_M1;
 				WLAST_S1 = WLAST_M1;
@@ -890,6 +951,37 @@ module AXI(
 				AWREADY_M1 = 1'b0;
 			end
 		end
+		default : begin
+			// Default all signals to zero to avoid X propagation (避免未知值)
+			BREADY_S0 = 1'b0;
+				BREADY_S1 = 1'b0;
+				BID_M1 = 4'd0;
+				BRESP_M1 = 2'd0;
+				BVALID_M1 = 1'b0;
+				WDATA_S1 = 32'd0;
+				WLAST_S1 = 1'b0;
+				WVALID_S1 = 1'b0;
+				WREADY_M1 = 1'b0;
+				WDATA_S0 = 32'd0;
+				WLAST_S0 = 1'b0;
+				WVALID_S0 = 1'b0;
+				WSTRB_S0 = 4'd0;
+				WSTRB_S1 = 4'd0;
+				AWID_S1 = 8'd0;
+				AWADDR_S1 = 32'd0;
+				AWLEN_S1 = 4'd0;
+				AWSIZE_S1 = 3'd0;
+				AWBURST_S1 = 2'd0;
+				AWVALID_S1 = 1'b0;
+				AWID_S0 = 8'd0;
+				AWADDR_S0 = 32'd0;
+				AWLEN_S0 = 4'd0;
+				AWSIZE_S0 = 3'd0;
+				AWBURST_S0 = 2'd0;
+				AWVALID_S0 = 1'b0;
+				AWREADY_M1 = 1'b0;
+		end
+		endcase
 	end
 
 	endmodule
